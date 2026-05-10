@@ -38,79 +38,74 @@ jobs:
       contents: write
 
     steps:
+          # ──────────────────────────────────────
+      # قدم اول: حذف پوشه downloads (درست مثل دکمه Delete directory)
       # ──────────────────────────────────────
-      # قدم اول: حذف کل پوشهٔ downloads با یک commit اتمی (API)
-      # ──────────────────────────────────────
-      - name: 🗑️ حذف پوشهٔ downloads با commit اتمی (بدون checkout)
+      - name: 🗑️ حذف پوشهٔ downloads (شبیه‌سازی Delete directory)
         if: github.event.inputs.clean_previous == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
         run: |
-          set -e
           API="https://api.github.com/repos/${REPO}"
           AUTH="Authorization: Bearer ${GH_TOKEN}"
           ACCEPT="Accept: application/vnd.github+json"
 
-          echo "📡 دریافت آخرین commit شاخهٔ ${BRANCH}..."
-          REF=$(curl -s -H "$AUTH" -H "$ACCEPT" "${API}/git/ref/heads/${BRANCH}")
-          COMMIT_SHA=$(echo "$REF" | jq -r '.object.sha')
+          echo "📡 دریافت آخرین commit..."
+          COMMIT_SHA=$(curl -s -H "$AUTH" -H "$ACCEPT" "$API/git/ref/heads/${BRANCH}" | jq -r '.object.sha')
           if [ -z "$COMMIT_SHA" ] || [ "$COMMIT_SHA" = "null" ]; then
-            echo "❌ شاخه یافت نشد."
-            exit 1
+            echo "❌ شاخه یافت نشد."; exit 1
           fi
-          echo "   ✅ آخرین commit: ${COMMIT_SHA}"
+          echo "   Commit: $COMMIT_SHA"
 
           echo "📡 دریافت درخت فعلی..."
-          COMMIT_DATA=$(curl -s -H "$AUTH" -H "$ACCEPT" "${API}/git/commits/${COMMIT_SHA}")
-          TREE_SHA=$(echo "$COMMIT_DATA" | jq -r '.tree.sha')
-          echo "   ✅ SHA درخت: ${TREE_SHA}"
+          TREE_SHA=$(curl -s -H "$AUTH" -H "$ACCEPT" "$API/git/commits/$COMMIT_SHA" | jq -r '.tree.sha')
+          echo "   Tree: $TREE_SHA"
 
-          echo "📡 دریافت کل درخت (recursive)..."
-          TREE_DATA=$(curl -s -H "$AUTH" -H "$ACCEPT" "${API}/git/trees/${TREE_SHA}?recursive=1")
-          # درخت ممکن است بزرگ باشد ولی معمولاً کمتر از ۱۰۰۰ فایل
-          ALL_ENTRIES=$(echo "$TREE_DATA" | jq '.tree')
-          if [ "$ALL_ENTRIES" = "null" ]; then
-            echo "⚠️ درخت خالی است. پوشه‌ای برای حذف وجود ندارد."
-            exit 0
+          echo "📡 دریافت محتوای درخت..."
+          TREE_ENTRIES=$(curl -s -H "$AUTH" -H "$ACCEPT" "$API/git/trees/$TREE_SHA?recursive=1" | jq '.tree')
+          if [ "$TREE_ENTRIES" = "null" ] || [ -z "$TREE_ENTRIES" ]; then
+            echo "📂 درخت خالی است. نیازی به حذف نیست."; exit 0
           fi
 
-          echo "🔍 حذف تمام مسیرهایی که با 'downloads/' شروع می‌شوند..."
-          NEW_TREE=$(echo "$ALL_ENTRIES" | jq '[.[] | select(.path | startswith("downloads/") | not)] | {tree: .}' | \
-                     curl -s -X POST -H "$AUTH" -H "$ACCEPT" -d @- "${API}/git/trees")
-          NEW_TREE_SHA=$(echo "$NEW_TREE" | jq -r '.sha')
+          # بررسی وجود فایل‌های downloads
+          HAS_DOWNLOADS=$(echo "$TREE_ENTRIES" | jq '[.[] | select(.path | startswith("downloads/"))] | length')
+          if [ "$HAS_DOWNLOADS" -eq 0 ]; then
+            echo "📂 پوشهٔ downloads وجود ندارد."; exit 0
+          fi
+
+          echo "🔍 حذف مسیرهای downloads... ($HAS_DOWNLOADS مورد پیدا شد)"
+
+          # ساخت درخت جدید بدون فایل‌های downloads
+          NEW_TREE_PAYLOAD=$(echo "$TREE_ENTRIES" | jq '[.[] | select(.path | startswith("downloads/") | not) | {path: .path, mode: .mode, type: .type, sha: .sha}] | {tree: .}')
+          NEW_TREE_SHA=$(curl -s -X POST -H "$AUTH" -H "$ACCEPT" -d "$NEW_TREE_PAYLOAD" "$API/git/trees" | jq -r '.sha')
           if [ -z "$NEW_TREE_SHA" ] || [ "$NEW_TREE_SHA" = "null" ]; then
-            echo "❌ ساخت درخت جدید شکست خورد:"
-            echo "$NEW_TREE"
-            exit 1
+            echo "❌ ساخت درخت جدید ناموفق."; exit 1
           fi
-          echo "   ✅ درخت جدید: ${NEW_TREE_SHA}"
+          echo "   New Tree: $NEW_TREE_SHA"
 
-          echo "📝 ایجاد commit جدید..."
-          NEW_COMMIT=$(curl -s -X POST -H "$AUTH" -H "$ACCEPT" \
-            "${API}/git/commits" \
-            -d "{\"message\":\"پاک‌سازی downloads پیش از دانلود\",\"tree\":\"${NEW_TREE_SHA}\",\"parents\":[\"${COMMIT_SHA}\"]}")
-          NEW_COMMIT_SHA=$(echo "$NEW_COMMIT" | jq -r '.sha')
+          echo "📝 ایجاد commit حذف..."
+          NEW_COMMIT_SHA=$(curl -s -X POST -H "$AUTH" -H "$ACCEPT" \
+            -d "{\"message\":\"پاک‌سازی پوشهٔ downloads\",\"tree\":\"${NEW_TREE_SHA}\",\"parents\":[\"${COMMIT_SHA}\"]}" \
+            "$API/git/commits" | jq -r '.sha')
           if [ -z "$NEW_COMMIT_SHA" ] || [ "$NEW_COMMIT_SHA" = "null" ]; then
-            echo "❌ ایجاد commit شکست خورد:"
-            echo "$NEW_COMMIT"
-            exit 1
+            echo "❌ ایجاد commit ناموفق."; exit 1
           fi
-          echo "   ✅ commit جدید: ${NEW_COMMIT_SHA}"
+          echo "   New Commit: $NEW_COMMIT_SHA"
 
-          echo "🔄 به‌روزرسانی شاخهٔ ${BRANCH}..."
-          UPDATE=$(curl -s -X PATCH -H "$AUTH" -H "$ACCEPT" \
-            "${API}/git/refs/heads/${BRANCH}" \
-            -d "{\"sha\":\"${NEW_COMMIT_SHA}\",\"force\":false}")
-          if echo "$UPDATE" | jq -e '.ref' > /dev/null; then
-            echo "✅ پوشهٔ downloads با موفقیت حذف شد."
+          echo "🔄 به‌روزرسانی شاخه..."
+          PATCH_RESULT=$(curl -s -X PATCH -H "$AUTH" -H "$ACCEPT" \
+            -d "{\"sha\":\"${NEW_COMMIT_SHA}\",\"force\":false}" \
+            "$API/git/refs/heads/${BRANCH}")
+          if echo "$PATCH_RESULT" | jq -e '.ref' > /dev/null; then
+            echo "✅ پوشهٔ downloads و تمام فایل‌هایش یکجا حذف شدند."
           else
-            echo "❌ به‌روزرسانی شاخه شکست خورد:"
-            echo "$UPDATE"
+            echo "❌ آپدیت شاخه ناموفق:"
+            echo "$PATCH_RESULT"
             exit 1
           fi
-
+          
       # ──────────────────────────────────────
       # قدم دوم: دریافت شاخه (حالا سبک)
       # ──────────────────────────────────────
